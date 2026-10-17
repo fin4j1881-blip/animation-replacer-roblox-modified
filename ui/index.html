@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roblox Animation Replacer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo-area">
+        <div class="logo-icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+        </div>
+        <div>
+          <h1 class="app-title" data-i18n="appTitle">Roblox Animation Replacer</h1>
+          <p class="app-subtitle" data-i18n="appSubtitle">High-performance bulk animation re-uploader & code replacer</p>
+        </div>
+      </div>
+      <div class="header-badges">
+        <!-- Language Selector -->
+        <select id="langSelect" class="lang-select" title="Change Language / Dil Değiştir">
+          <option value="tr">🇹🇷 Türkçe</option>
+          <option value="en">🇺🇸 English</option>
+          <option value="es">🇪🇸 Español</option>
+          <option value="pt">🇧🇷 Português</option>
+          <option value="de">🇩🇪 Deutsch</option>
+          <option value="fr">🇫🇷 Français</option>
+          <option value="ru">🇷🇺 Русский</option>
+          <option value="ja">🇯🇵 日本語</option>
+          <option value="ko">🇰🇷 한국어</option>
+          <option value="zh">🇨🇳 简体中文</option>
+          <option value="ar">🇸🇦 العربية</option>
+        </select>
+
+        <div class="badge-account" id="accountBadge" style="display: none;">
+          <span class="account-dot"></span>
+          <span id="accountNameText" data-i18n="notConnected">Not Connected</span>
+        </div>
+        <div class="badge-status" id="connectionBadge">
+          <span class="status-dot"></span> <span id="connectionBadgeText" data-i18n="ready">Ready</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Credentials Section -->
+      <section class="card">
+        <div class="card-header-flex">
+          <h2 class="card-title" style="margin-bottom: 0;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+            <span data-i18n="authSection">Roblox Authentication</span>
+          </h2>
+
+          <div class="auto-actions">
+            <label class="mode-switch" id="autoModeSwitchLabel" title="Automatically fetch cookie from Roblox Studio and upload without requiring an API key">
+              <input type="checkbox" id="autoModeToggle" checked>
+              <span class="mode-slider"></span>
+              <span class="mode-label" data-i18n="autoMode">⚡ Auto Mode (Roblox Studio)</span>
+            </label>
+            <button type="button" class="btn-accent" id="autoDetectBtn" title="Detect logged-in Roblox Studio account from Windows" data-i18n="autoDetectBtn">
+              🔍 Auto-Detect Studio
+            </button>
+          </div>
+        </div>
+
+        <div class="auto-mode-banner" id="autoModeBanner">
+          <div class="banner-icon">⚡</div>
+          <div class="banner-text">
+            <strong data-i18n="autoBannerStrong">Automatic Mode Enabled:</strong>
+            <span data-i18n="autoBannerText"> Your .ROBLOSECURITY cookie is automatically detected from Roblox Studio, and animations can be uploaded directly via Studio protocol without needing a Cloud API Key!</span>
+          </div>
+        </div>
+        
+        <div class="grid-2" id="manualCredsContainer">
+          <div class="input-group">
+            <label for="cookieInput">
+              <span data-i18n="cookieLabel">.ROBLOSECURITY Cookie</span> <span class="optional" id="cookieReqLabel" data-i18n="cookieAutoHint">(Auto-detected if blank)</span>
+            </label>
+            <div class="input-with-button">
+              <input type="password" id="cookieInput" data-i18n-placeholder="cookiePlaceholder" placeholder="Auto-detected from Roblox Studio or paste here..." autocomplete="off">
+              <button type="button" class="btn-icon" id="toggleCookieBtn" title="Show/Hide">
+                👁
+              </button>
+            </div>
+            <span class="input-hint" data-i18n="cookieHint">Automatically grabbed from Windows Roblox Studio session if left blank</span>
+          </div>
+
+          <div class="input-group">
+            <label for="apiKeyInput">
+              <span data-i18n="apiKeyLabel">Open Cloud API Key</span> <span class="optional" data-i18n="apiKeyOptional">(Optional - Leave blank for Studio Upload)</span>
+            </label>
+            <div class="input-with-button">
+              <input type="password" id="apiKeyInput" data-i18n-placeholder="apiKeyPlaceholder" placeholder="Optional: Leave empty for direct cookie upload..." autocomplete="off">
+              <button type="button" class="btn-icon" id="toggleApiKeyBtn" title="Show/Hide">
+                👁
+              </button>
+              <button type="button" class="btn-secondary btn-xs" id="autoGenApiKeyBtn" title="Try auto-generating an Open Cloud API Key" data-i18n="autoKeyBtn">
+                ✨ Auto-Key
+              </button>
+              <button type="button" class="btn-icon" id="openCloudPageBtn" title="Open Roblox Creator Dashboard API Keys page">
+                🌐
+              </button>
+            </div>
+            <span class="input-hint" data-i18n="apiKeyHint">Leave empty to upload directly via Studio Cookie, or click ✨ Auto-Key</span>
+          </div>
+        </div>
+
+        <div class="checkbox-row remember-row">
+          <label class="custom-checkbox">
+            <input type="checkbox" id="rememberCreds" checked>
+            <span class="checkmark"></span>
+            <span data-i18n="rememberCreds">Remember credentials & mode locally on this machine</span>
+          </label>
+        </div>
+      </section>
+
+      <!-- Place File Section -->
+      <section class="card">
+        <h2 class="card-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+          </svg>
+          <span data-i18n="filesSection">Place Files & Target</span>
+        </h2>
+
+        <div class="input-group">
+          <label for="fileInput"><span data-i18n="targetFileLabel">Target Place File (.rbxl or .rbxlx)</span> <span class="required">*</span></label>
+          <div class="input-with-button">
+            <input type="text" id="fileInput" data-i18n-placeholder="filePlaceholder" placeholder="C:\Users\...\Game.rbxl" readonly>
+            <button type="button" class="btn-secondary" id="browseFileBtn" data-i18n="browseBtn">Browse...</button>
+          </div>
+        </div>
+
+        <div class="input-group">
+          <label for="outputInput"><span data-i18n="outputFileLabel">Output File</span> <span class="optional" data-i18n="outputOptional">(Optional - overwrites original if empty)</span></label>
+          <div class="input-with-button">
+            <input type="text" id="outputInput" data-i18n-placeholder="outputPlaceholder" placeholder="Optional: C:\Users\...\Game_Replaced.rbxl" readonly>
+            <button type="button" class="btn-secondary" id="browseOutputBtn" data-i18n="saveAsBtn">Save As...</button>
+            <button type="button" class="btn-icon" id="clearOutputBtn" title="Clear">✕</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Options & Parameters Section -->
+      <section class="card">
+        <h2 class="card-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          <span data-i18n="optionsSection">Upload & Replacement Options</span>
+        </h2>
+
+        <div class="grid-2">
+          <div class="input-group">
+            <label for="groupIdInput"><span data-i18n="groupIdLabel">Roblox Group ID</span> <span class="optional" data-i18n="groupOptional">(Optional)</span></label>
+            <input type="number" id="groupIdInput" data-i18n-placeholder="groupPlaceholder" placeholder="Leave blank for personal inventory">
+          </div>
+
+          <div class="input-group">
+            <label for="threadsSlider" data-i18n="threadsLabel">Concurrent Threads (Semaphore)</label>
+            <div class="slider-container">
+              <input type="range" id="threadsSlider" min="1" max="50" value="10">
+              <span id="threadsValue" class="slider-val">10</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="checkbox-grid">
+          <label class="custom-checkbox">
+            <input type="checkbox" id="unformattedIds">
+            <span class="checkmark"></span>
+            <div>
+              <strong data-i18n="unformattedIdsTitle">Scan Unformatted IDs</strong>
+              <small data-i18n="unformattedIdsDesc">Detect bare 6+ digit numbers in scripts besides rbxassetid://</small>
+            </div>
+          </label>
+
+          <label class="custom-checkbox">
+            <input type="checkbox" id="keepNames" checked>
+            <span class="checkmark"></span>
+            <div>
+              <strong data-i18n="keepNamesTitle">Keep Original Asset Names</strong>
+              <small data-i18n="keepNamesDesc">Preserves animation titles instead of generic names</small>
+            </div>
+          </label>
+
+          <label class="custom-checkbox">
+            <input type="checkbox" id="dryRun">
+            <span class="checkmark"></span>
+            <div>
+              <strong data-i18n="dryRunTitle">Dry Run Mode (Test Only)</strong>
+              <small data-i18n="dryRunDesc">Scan and report assets without uploading or modifying file</small>
+            </div>
+          </label>
+        </div>
+      </section>
+
+      <!-- Action Area -->
+      <div class="action-bar">
+        <button type="button" class="btn-primary" id="startBtn">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="btn-icon-svg">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <span id="startBtnText" data-i18n="startBtn">Start Replacement</span>
+        </button>
+      </div>
+
+      <!-- Live Progress & Stats -->
+      <section class="card" id="progressCard">
+        <div class="stats-row">
+          <div class="stat-box">
+            <span class="stat-num" id="animCountStat">0</span>
+            <span class="stat-label" data-i18n="statAnimations">Animations</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-num" id="audioCountStat">0</span>
+            <span class="stat-label" data-i18n="statAudios">Audios Found</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-num" id="replacedCountStat">0</span>
+            <span class="stat-label" data-i18n="statReplaced">Replaced</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-num stat-stage" id="currentStageStat" data-i18n="idle">Idle</span>
+            <span class="stat-label" data-i18n="statStage">Current Stage</span>
+          </div>
+        </div>
+
+        <div class="progress-bar-container">
+          <div class="progress-bar-fill" id="progressBarFill"></div>
+        </div>
+        <div class="progress-text-row">
+          <span id="progressStatusText" data-i18n="ready">Ready to start</span>
+          <span id="progressPercentText">0%</span>
+        </div>
+      </section>
+
+      <!-- Console Log Terminal -->
+      <section class="card console-card">
+        <div class="console-header">
+          <div class="console-dots">
+            <span class="dot dot-red"></span>
+            <span class="dot dot-yellow"></span>
+            <span class="dot dot-green"></span>
+            <span class="console-title" data-i18n="logTitle">Live Process Log</span>
+          </div>
+          <div class="console-actions">
+            <button type="button" class="btn-sm" id="copyLogsBtn" data-i18n="copyBtn">Copy</button>
+            <button type="button" class="btn-sm" id="clearLogsBtn" data-i18n="clearBtn">Clear</button>
+          </div>
+        </div>
+        <div class="console-body" id="consoleBody">
+          <div class="log-line log-info" id="initialLogLine" data-i18n="readyLog">[SYSTEM] Ready. Auto-Mode is active — select your place file and click 'Start Replacement'.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

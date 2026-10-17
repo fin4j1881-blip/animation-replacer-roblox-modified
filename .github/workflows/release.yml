@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    name: Build Release on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: animation-replacer-gui-windows.exe
+            cli_artifact_name: animation-replacer-cli-windows.exe
+            target_gui_path: target/release/animation-replacer-gui.exe
+            target_cli_path: target/release/animation-replace-roblox.exe
+          - os: ubuntu-latest
+            artifact_name: animation-replacer-gui-linux
+            cli_artifact_name: animation-replacer-cli-linux
+            target_gui_path: target/release/animation-replacer-gui
+            target_cli_path: target/release/animation-replace-roblox
+          - os: macos-latest
+            artifact_name: animation-replacer-gui-macos
+            cli_artifact_name: animation-replacer-cli-macos
+            target_gui_path: target/release/animation-replacer-gui
+            target_cli_path: target/release/animation-replace-roblox
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux GUI Dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Release Binaries
+        run: cargo build --release --workspace
+
+      - name: Rename Artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "${{ matrix.target_gui_path }}" "dist/${{ matrix.artifact_name }}"
+          cp "${{ matrix.target_cli_path }}" "dist/${{ matrix.cli_artifact_name }}"
+
+      - name: Upload Binaries to Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

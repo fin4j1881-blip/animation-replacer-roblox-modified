@@ -1,0 +1,19 @@
+{
+  "name": "animation-replacer-roblox-gui",
+  "version": "0.1.0",
+  "description": "Roblox Animation Replacer Desktop GUI",
+  "author": "fin4j1881-blip",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fin4j1881-blip/animation-replacer-roblox-modified.git"
+  },
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}

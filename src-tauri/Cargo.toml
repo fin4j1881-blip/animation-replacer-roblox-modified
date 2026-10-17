@@ -1,0 +1,29 @@
+[package]
+name = "animation-replacer-gui"
+version = "0.1.0"
+description = "Roblox Animation Replacer Modern Desktop GUI (Tauri 2)"
+authors = ["fin4j1881-blip", "shibahex", "Roblox Animation Replacer Contributors"]
+license = "MIT"
+repository = "https://github.com/fin4j1881-blip/animation-replacer-roblox-modified"
+edition = "2024"
+
+[lib]
+name = "animation_replacer_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+rfd = "0.15"
+animation-replace-roblox = { path = ".." }
+roboat = { git = "https://github.com/shibahex/roboat-extras.git", branch = "upload-animation-fix" }
+shellexpand = "3.1.1"
+anyhow = "1.0"
+tracing = "0.1"
+open = "5.3"
+reqwest = { version = "0.12.21", features = ["json"] }

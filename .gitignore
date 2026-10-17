@@ -1,0 +1,37 @@
+# Rust build output
+/target/
+target/
+**/*.rs.bk
+Cargo.lock.backup
+
+# Roblox place files (large binary assets)
+*.rbxl
+*.rbxlx
+output.rbxl
+example.rbxl
+silah_sistemi_spoofed.rbxl
+
+# Environment & credentials (safety first)
+*.env
+*.env.*
+*.cookie
+*.secret
+
+# Logs & temporary files
+logs/
+*.log
+*.tmp
+*.bak
+test_*.js
+scratch/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor configs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
