@@ -1,6 +1,23 @@
+KULLANIM VE LİSANS SÖZLEŞMESİ
+
+Telif Hakkı (c) 2026 Kerem Demir Tüm hakları saklıdır.
+
+Bu yazılımın kaynak kodu, kullanıcıların kodu incelemesi, öğrenmesi ve kişisel, ticari olmayan amaçlarla kendi sistemlerinde çalıştırması/kullanması için açık olarak sunulmuştur. 
+
+Bu yazılımı indiren, kopyalayan veya inceleyen herkes aşağıdaki şartları kabul etmiş sayılır:
+
+1. Değişiklik Yasağı: Bu yazılımın kaynak kodu üzerinde değişiklik yapılamaz, kod parçalanamaz, başka projelerle birleştirilemez ve değiştirilmiş sürümleri yeniden dağıtılamaz.
+2. Ticari Kullanım Yasağı: Bu yazılım, yazılımın bir parçası veya bu yazılımdan elde edilen herhangi bir çıktı; doğrudan veya dolaylı olarak ticari bir amaçla (satış, kiralama, reklam geliri elde etme, ücretli hizmet sunma vb.) kullanılamaz.
+3. Dağıtım Şartı: Yazılımın orijinal ve değiştirilmemiş hali, yalnızca bu lisans metni aynen korunmak ve kaynak gösterilmek şartıyla ticari olmayan amaçlarla başkalarıyla paylaşılabilir.
+
+YAZILIM "OLDUĞU GİBİ" SUNULMAKTADIR. YAZAR, YAZILIMIN PERFORMANSI, GÜVENLİĞİ VEYA KULLANIMINDAN DOĞABİLECEK HİÇBİR ZARARDAN HUKUKİ OLARAK SORUMLU TUTULAMAZ.
+
+--------------------------------------------------------------------------------
+
+ORIGINAL UPSTREAM PROJECT NOTICE (shibahex/animation-replacer-roblox):
+
 MIT License
 
-Copyright (c) 2026 Fin4j Dev
 Copyright (c) 2026 shibahex
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

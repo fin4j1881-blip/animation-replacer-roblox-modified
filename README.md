@@ -206,4 +206,5 @@ Bu sürüm, **shibahex** tarafından yazılan orijinal projenin derinlemesine op
 
 ## 📄 License
 
-Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more information.
+See [`LICENSE`](LICENSE) for complete usage terms and licensing conditions.
+
