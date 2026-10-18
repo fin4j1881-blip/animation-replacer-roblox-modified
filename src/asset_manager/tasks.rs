@@ -15,6 +15,7 @@ const MAX_UPLOAD_RETRIES: usize = 5;
 
 pub type UploadResult = Result<(Option<String>, String), (Option<String>, RoboatError)>;
 pub type ProgressCallback = Arc<dyn Fn(usize, usize, &str, &str) + Send + Sync>;
+pub type LogCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 // ============================================================================
 // Upload Task Management
@@ -30,6 +31,7 @@ pub struct UploadContext {
     /// When true, reuploaded animations keep the original asset's display name.
     pub keep_names: bool,
     pub on_progress: Option<ProgressCallback>,
+    pub on_log: Option<LogCallback>,
 }
 
 impl UploadContext {
@@ -40,6 +42,7 @@ impl UploadContext {
         total_assets: usize,
         keep_names: bool,
         on_progress: Option<ProgressCallback>,
+        on_log: Option<LogCallback>,
     ) -> Self {
         let concurrency = max_concurrent_tasks.max(1) as usize;
         Self {
@@ -51,6 +54,7 @@ impl UploadContext {
             completed_count: Arc::new(AtomicUsize::new(0)),
             keep_names,
             on_progress,
+            on_log,
         }
     }
 
@@ -159,8 +163,25 @@ impl UploadContext {
                         RoboatError::TooManyRequests | RoboatError::InternalServerError
                     ) {
                         let sleep_time = (attempt as u64) * 30;
+                        if let Some(ref log_cb) = self.on_log {
+                            log_cb(
+                                "warn",
+                                &format!(
+                                    "Rate limit or server error on asset {}. Backing off for {}s...",
+                                    request_id, sleep_time
+                                ),
+                            );
+                        }
                         self.rate_limiter.set_rate_limit(sleep_time).await;
                         self.rate_limiter.wait_if_limited().await;
+                    } else if attempt == 1 {
+                        // Immediately notify GUI on first failure so the user doesn't wait in silence
+                        if let Some(ref log_cb) = self.on_log {
+                            log_cb(
+                                "warn",
+                                &format!("Asset {} upload warning: {}", request_id, e),
+                            );
+                        }
                     }
 
                     last_error = Some(e);
@@ -169,6 +190,17 @@ impl UploadContext {
                         tokio::time::sleep(Duration::from_millis(1000)).await;
                     } else {
                         error!("Failed to upload {:?} {}", asset_type, request_id);
+                        if let Some(ref log_cb) = self.on_log {
+                            if let Some(ref err) = last_error {
+                                log_cb(
+                                    "error",
+                                    &format!(
+                                        "Asset {} failed after {} retries: {}",
+                                        request_id, MAX_UPLOAD_RETRIES, err
+                                    ),
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -195,12 +227,7 @@ pub async fn collect_upload_results(
                 warn!("Upload succeeded but no request_id available");
             }
             Ok(Err((request_id, e))) => {
-                if matches!(e, RoboatError::BadRequest) {
-                    error!(
-                        "Failed to upload asset: {:?} (cookie may lack required permissions)",
-                        request_id
-                    );
-                }
+                error!("Failed to upload asset: {:?} - {}", request_id, e);
                 errors.push(e);
             }
             Err(join_error) => {
@@ -215,6 +242,10 @@ pub async fn collect_upload_results(
         errors.len(),
         total_tasks
     );
+
+    if finished_asset_hashmap.is_empty() && !errors.is_empty() {
+        return Err(errors.remove(0));
+    }
 
     Ok(finished_asset_hashmap)
 }

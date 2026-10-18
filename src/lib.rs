@@ -10,6 +10,7 @@ pub mod studio;
 pub mod script;
 
 pub use asset_manager::credentials::scan_windows_credential_for_cookie;
+pub use asset_manager::tasks::{LogCallback, ProgressCallback};
 pub use asset_manager::uploader::AssetUploader;
 pub use studio::workplace_parser::StudioParserBuilder;
 

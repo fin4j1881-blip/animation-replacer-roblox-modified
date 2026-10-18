@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use super::ratelimiter::RateLimiter;
-use super::tasks::{ProgressCallback, UploadContext, collect_upload_results};
+use super::tasks::{LogCallback, ProgressCallback, UploadContext, collect_upload_results};
 
 const DEFAULT_CONCURRENT_TASKS: u64 = 50;
 const DEFAULT_ANIMATION_NAME: &str = "reuploaded_animation";
@@ -27,6 +27,7 @@ pub struct AssetUploader {
     pub(super) place_id_cache: RwLock<HashMap<u64, u64>>,
     pub(super) failed_creators: RwLock<HashSet<u64>>,
     pub(super) xcsrf_token: RwLock<String>,
+    pub(super) cached_user_id: RwLock<Option<u64>>,
 }
 
 impl fmt::Debug for AssetUploader {
@@ -69,6 +70,7 @@ impl AssetUploader {
             place_id_cache: RwLock::new(HashMap::new()),
             failed_creators: RwLock::new(HashSet::new()),
             xcsrf_token: RwLock::new(String::new()),
+            cached_user_id: RwLock::new(None),
         }
     }
 
@@ -109,8 +111,18 @@ impl AssetUploader {
         None
     }
 
-    /// Uploads an animation using only the .ROBLOSECURITY cookie via Roblox Studio IDE publish endpoint
-    /// when no Open Cloud API key is provided.
+    /// Returns the authenticated user's ID, fetching and caching it via roboat if necessary.
+    pub async fn user_id(&self) -> Result<u64, RoboatError> {
+        if let Some(id) = *self.cached_user_id.read().await {
+            return Ok(id);
+        }
+        let id = self.roboat_client.user_id().await?;
+        *self.cached_user_id.write().await = Some(id);
+        Ok(id)
+    }
+
+    /// Uploads an animation using only the .ROBLOSECURITY cookie via Roblox Studio user-auth API
+    /// (https://apis.roblox.com/assets/user-auth/v1/assets).
     pub async fn upload_asset_via_cookie(
         &self,
         asset_data: Bytes,
@@ -118,33 +130,47 @@ impl AssetUploader {
         asset_name: Option<String>,
     ) -> Result<String, RoboatError> {
         let name = asset_name.unwrap_or_else(|| DEFAULT_ANIMATION_NAME.to_string());
-        let mut url = reqwest::Url::parse("https://www.roblox.com/ide/publish/UploadNewAnimation")
-            .expect("valid static url");
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("assetTypeName", "Animation");
-            query.append_pair("name", &name);
-            query.append_pair("description", DEFAULT_ANIMATION_DESCRIPTION);
-            query.append_pair("AllID", "1");
-            query.append_pair("ispublic", "False");
-            query.append_pair("allowComments", "True");
-            query.append_pair("isGamesAsset", "False");
-            if let Some(gid) = group_id {
-                query.append_pair("groupId", &gid.to_string());
-            }
-        }
-
         let cookie_header = format!(".ROBLOSECURITY={}", self.roblosecurity);
+
+        let creator_value = if let Some(gid) = group_id {
+            serde_json::json!({ "groupId": gid.to_string() })
+        } else {
+            let uid = self.user_id().await?;
+            serde_json::json!({ "userId": uid.to_string() })
+        };
+
+        let request_payload = serde_json::json!({
+            "assetType": "Animation",
+            "displayName": name,
+            "description": DEFAULT_ANIMATION_DESCRIPTION,
+            "creationContext": {
+                "creator": creator_value,
+                "expectedPrice": 0
+            }
+        });
+        let request_json = serde_json::to_string(&request_payload)
+            .map_err(|_| RoboatError::MalformedResponse)?;
+
         let mut xcsrf = self.xcsrf_token.read().await.clone();
+        let upload_url = "https://apis.roblox.com/assets/user-auth/v1/assets";
 
         for _ in 0..2 {
+            let form = reqwest::multipart::Form::new()
+                .part(
+                    "fileContent",
+                    reqwest::multipart::Part::bytes(asset_data.to_vec())
+                        .file_name("animation.rbxm")
+                        .mime_str("model/x-rbxm")
+                        .map_err(|_| RoboatError::MalformedResponse)?,
+                )
+                .text("request", request_json.clone());
+
             let mut req = self
                 .http_client
-                .post(url.clone())
+                .post(upload_url)
                 .timeout(Duration::from_secs(UPLOAD_TIMEOUT_SECS))
                 .header("Cookie", &cookie_header)
                 .header("User-Agent", "RobloxStudio/WinInet")
-                .header("Content-Type", "application/octet-stream")
                 .header("Requester", "Client");
 
             if !xcsrf.is_empty() {
@@ -152,12 +178,14 @@ impl AssetUploader {
             }
 
             let resp = req
-                .body(asset_data.clone())
+                .multipart(form)
                 .send()
                 .await
                 .map_err(RoboatError::ReqwestError)?;
 
-            if resp.status().as_u16() == 403 {
+            let status = resp.status();
+
+            if status.as_u16() == 403 {
                 if let Some(new_token) = resp
                     .headers()
                     .get("x-csrf-token")
@@ -167,29 +195,137 @@ impl AssetUploader {
                     *self.xcsrf_token.write().await = xcsrf.clone();
                     continue;
                 }
+                let body = resp.text().await.unwrap_or_default();
+                warn!("Cookie upload 403 Forbidden: {}", body);
+                return Err(RoboatError::UnknownRobloxErrorCode {
+                    code: 403,
+                    message: format!("Permission/Group role denied: {}", body),
+                });
+            }
+
+            if status.as_u16() == 401 {
                 return Err(RoboatError::InvalidRoblosecurity);
             }
 
-            if resp.status().as_u16() == 429 {
+            if status.as_u16() == 429 {
                 return Err(RoboatError::TooManyRequests);
             }
 
-            if resp.status().is_server_error() {
+            if status.is_server_error() {
                 return Err(RoboatError::InternalServerError);
             }
 
-            if !resp.status().is_success() {
-                return Err(RoboatError::BadRequest);
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                warn!("Cookie upload failed (status {}): {}", status, body);
+                return Err(RoboatError::UnknownRobloxErrorCode {
+                    code: status.as_u16(),
+                    message: format!("HTTP {}: {}", status, body),
+                });
             }
 
+            // Success (200/201): Parse operation response
             let body_text = resp.text().await.map_err(RoboatError::ReqwestError)?;
-            let trimmed = body_text.trim().to_string();
-            if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
-                info!("Uploaded complete (Studio Cookie Mode)! {:?}", trimmed);
-                return Ok(trimmed);
-            } else {
-                return Err(RoboatError::MalformedResponse);
+            let op: serde_json::Value = serde_json::from_str(&body_text)
+                .map_err(|_| RoboatError::MalformedResponse)?;
+
+            // If operation is already done
+            if op.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if let Some(asset_id) = op
+                    .get("response")
+                    .and_then(|r| r.get("assetId"))
+                    .and_then(|v| v.as_str())
+                {
+                    info!("Upload complete (Studio Cookie Mode)! Asset ID: {}", asset_id);
+                    return Ok(asset_id.to_string());
+                }
             }
+
+            // If operation is pending, poll it
+            if let Some(path) = op.get("path").and_then(|v| v.as_str()) {
+                let poll_url = if path.starts_with("http") {
+                    path.to_string()
+                } else {
+                    format!("https://apis.roblox.com/assets/user-auth/v1/{}", path)
+                };
+
+                for _ in 0..MAX_POLL_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+
+                    let mut poll_req = self
+                        .http_client
+                        .get(&poll_url)
+                        .timeout(Duration::from_secs(15))
+                        .header("Cookie", &cookie_header)
+                        .header("User-Agent", "RobloxStudio/WinInet");
+
+                    if !xcsrf.is_empty() {
+                        poll_req = poll_req.header("X-CSRF-TOKEN", &xcsrf);
+                    }
+
+                    let poll_resp = match poll_req.send().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!("Polling error: {}", e);
+                            continue;
+                        }
+                    };
+
+                    if poll_resp.status().as_u16() == 403 {
+                        if let Some(new_token) = poll_resp
+                            .headers()
+                            .get("x-csrf-token")
+                            .and_then(|v| v.to_str().ok())
+                        {
+                            xcsrf = new_token.to_string();
+                            *self.xcsrf_token.write().await = xcsrf.clone();
+                            continue;
+                        }
+                    }
+
+                    if !poll_resp.status().is_success() {
+                        continue;
+                    }
+
+                    let poll_body = poll_resp.text().await.unwrap_or_default();
+                    if let Ok(poll_val) = serde_json::from_str::<serde_json::Value>(&poll_body) {
+                        if poll_val.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            if let Some(asset_id) = poll_val
+                                .get("response")
+                                .and_then(|r| r.get("assetId"))
+                                .and_then(|v| v.as_str())
+                            {
+                                info!(
+                                    "Upload complete (Studio Cookie Mode polled)! Asset ID: {}",
+                                    asset_id
+                                );
+                                return Ok(asset_id.to_string());
+                            }
+                            if let Some(err_msg) = poll_val
+                                .get("error")
+                                .and_then(|e| e.get("message"))
+                                .and_then(|v| v.as_str())
+                            {
+                                warn!("Operation reported failure: {}", err_msg);
+                                return Err(RoboatError::UnknownRobloxErrorCode {
+                                    code: 400,
+                                    message: err_msg.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                return Err(RoboatError::InternalServerError);
+            }
+
+            // Fallback: check if the body was directly the asset id (legacy behavior)
+            let trimmed = body_text.trim();
+            if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+                info!("Upload complete (Direct ID)! {:?}", trimmed);
+                return Ok(trimmed.to_string());
+            }
+
+            return Err(RoboatError::MalformedResponse);
         }
 
         Err(RoboatError::InternalServerError)
@@ -208,16 +344,31 @@ impl AssetUploader {
                 .await;
         }
 
-        let resp = self
+        let resp = match self
             .roboat_client
             .upload_animation(
                 self.api_key.clone(),
                 group_id,
-                asset_name.unwrap_or_else(|| DEFAULT_ANIMATION_NAME.to_string()),
+                asset_name.clone().unwrap_or_else(|| DEFAULT_ANIMATION_NAME.to_string()),
                 DEFAULT_ANIMATION_DESCRIPTION.to_string(),
                 &asset_data,
             )
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Open Cloud API upload failed: {:?}", e);
+                // If Open Cloud fails (e.g. invalid key or missing group permissions) but we have a cookie,
+                // attempt Studio Cookie upload as a fallback.
+                if !self.roblosecurity.trim().is_empty() {
+                    warn!("Attempting fallback to Studio Cookie upload...");
+                    return self
+                        .upload_asset_via_cookie(asset_data, group_id, asset_name)
+                        .await;
+                }
+                return Err(e);
+            }
+        };
 
         for _ in 0..MAX_POLL_ATTEMPTS {
             let operation = self
@@ -229,6 +380,13 @@ impl AssetUploader {
                 if let Some(asset_id) = operation.response.and_then(|resp| resp.asset_id) {
                     info!("Uploaded complete! {:?}", asset_id);
                     return Ok(asset_id);
+                }
+                if let Some(err) = operation.error {
+                    warn!("Open Cloud operation error: {}", err.message);
+                    return Err(RoboatError::UnknownRobloxErrorCode {
+                        code: err.code as u16,
+                        message: err.message,
+                    });
                 }
                 return Err(RoboatError::InternalServerError);
             }
@@ -253,7 +411,7 @@ impl AssetUploader {
         task_count: Option<u64>,
         keep_names: bool,
     ) -> Result<HashMap<String, String>, RoboatError> {
-        self.reupload_all_assets_with_progress(assets, group_id, task_count, keep_names, None)
+        self.reupload_all_assets_with_callbacks(assets, group_id, task_count, keep_names, None, None)
             .await
     }
 
@@ -266,6 +424,20 @@ impl AssetUploader {
         keep_names: bool,
         on_progress: Option<ProgressCallback>,
     ) -> Result<HashMap<String, String>, RoboatError> {
+        self.reupload_all_assets_with_callbacks(assets, group_id, task_count, keep_names, on_progress, None)
+            .await
+    }
+
+    /// Reuploads multiple animations concurrently with optional progress and log callbacks.
+    pub async fn reupload_all_assets_with_callbacks(
+        self: Arc<Self>,
+        assets: Vec<roboat::assetdelivery::AssetBatchResponse>,
+        group_id: Option<u64>,
+        task_count: Option<u64>,
+        keep_names: bool,
+        on_progress: Option<ProgressCallback>,
+        on_log: Option<LogCallback>,
+    ) -> Result<HashMap<String, String>, RoboatError> {
         let max_concurrent_tasks = task_count.unwrap_or(DEFAULT_CONCURRENT_TASKS);
         let total_assets = assets.len();
 
@@ -276,6 +448,7 @@ impl AssetUploader {
             total_assets,
             keep_names,
             on_progress,
+            on_log,
         );
 
         let tasks = ctx.spawn_upload_tasks(assets);

@@ -1,4 +1,6 @@
-use animation_replace_roblox::{StudioParser, scan_windows_credential_for_cookie};
+use animation_replace_roblox::{
+    LogCallback, StudioParser, scan_windows_credential_for_cookie,
+};
 use roboat::assetdelivery::AssetBatchResponse;
 use roboat::catalog::AssetType;
 use serde::{Deserialize, Serialize};
@@ -277,7 +279,7 @@ async fn run_replacement(
         .map_err(|e| format!("Uploader initialization error: {}", e))?;
 
     let app_for_cb = app.clone();
-    let progress_cb = Arc::new(
+    let progress_cb: animation_replace_roblox::ProgressCallback = Arc::new(
         move |done: usize, total: usize, old_id: &str, new_id: &str| {
             let scaled = 50 + ((done * 35) / total.max(1));
             emit_progress(&app_for_cb, scaled, 100, "Reuploading Assets");
@@ -292,23 +294,45 @@ async fn run_replacement(
         },
     );
 
+    let app_for_log = app.clone();
+    let log_cb: LogCallback = Arc::new(move |level: &str, message: &str| {
+        emit_log(&app_for_log, level, message.to_string());
+    });
+
+    let is_open_cloud = !uploader.api_key.trim().is_empty();
+
     let mapping = uploader
-        .reupload_all_assets_with_progress(
+        .reupload_all_assets_with_callbacks(
             all_animations,
             config.group,
             config.threads,
             config.keep_names,
             Some(progress_cb),
+            Some(log_cb),
         )
         .await
-        .map_err(|e| format!("Upload error: {}", e))?;
+        .map_err(|e| {
+            let mode = if is_open_cloud {
+                "Open Cloud API Mode"
+            } else {
+                "Studio Cookie Mode"
+            };
+            let group_note = if let Some(gid) = config.group {
+                format!(" [Target Group: {}]", gid)
+            } else {
+                String::new()
+            };
+            let advice = if config.group.is_some() {
+                " Check that: 1) Your account has 'Create and edit group items' permission in this group. 2) If using an Open Cloud API key, ensure the key was created under the Group in Creator Hub with 'Assets (Write)' permissions."
+            } else {
+                " Check that your .ROBLOSECURITY cookie is valid and not expired, or that your API key has 'Assets (Write)' permissions."
+            };
+            format!("Upload error [{}]{}: {}.{}", mode, group_note, e, advice)
+        })?;
 
     let replaced_count = mapping.len();
     if replaced_count == 0 {
-        return Err(
-            "Failed to upload any animations. Check your cookie permissions or group role."
-                .to_string(),
-        );
+        return Err("No animations were successfully uploaded.".to_string());
     }
 
     emit_log(
