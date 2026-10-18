@@ -5,6 +5,7 @@ use roboat::RoboatError;
 use roboat::assetdelivery::AssetBatchResponse;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::Duration;
@@ -13,6 +14,7 @@ use tracing::{error, info, warn};
 const MAX_UPLOAD_RETRIES: usize = 5;
 
 pub type UploadResult = Result<(Option<String>, String), (Option<String>, RoboatError)>;
+pub type ProgressCallback = Arc<dyn Fn(usize, usize, &str, &str) + Send + Sync>;
 
 // ============================================================================
 // Upload Task Management
@@ -24,8 +26,10 @@ pub struct UploadContext {
     pub semaphore: Arc<Semaphore>,
     pub rate_limiter: Arc<RateLimiter>,
     pub total_assets: usize,
+    pub completed_count: Arc<AtomicUsize>,
     /// When true, reuploaded animations keep the original asset's display name.
     pub keep_names: bool,
+    pub on_progress: Option<ProgressCallback>,
 }
 
 impl UploadContext {
@@ -35,14 +39,18 @@ impl UploadContext {
         max_concurrent_tasks: u64,
         total_assets: usize,
         keep_names: bool,
+        on_progress: Option<ProgressCallback>,
     ) -> Self {
+        let concurrency = max_concurrent_tasks.max(1) as usize;
         Self {
             rate_limiter: Arc::clone(&uploader.rate_limiter),
             uploader,
             group_id,
-            semaphore: Arc::new(Semaphore::new(max_concurrent_tasks as usize)),
+            semaphore: Arc::new(Semaphore::new(concurrency)),
             total_assets,
+            completed_count: Arc::new(AtomicUsize::new(0)),
             keep_names,
+            on_progress,
         }
     }
 
@@ -53,7 +61,7 @@ impl UploadContext {
     ) -> JoinSet<UploadResult> {
         let mut set = JoinSet::new();
 
-        for (index, asset) in asset_batch.into_iter().enumerate() {
+        for asset in asset_batch {
             let Some(location) = asset
                 .locations
                 .as_ref()
@@ -74,7 +82,11 @@ impl UploadContext {
             set.spawn(async move {
                 // Wait for rate limit before acquiring permit so permits aren't hogged during sleep
                 ctx.rate_limiter.wait_if_limited().await;
-                let _permit = ctx.semaphore.acquire().await.unwrap();
+                let _permit = ctx
+                    .semaphore
+                    .acquire()
+                    .await
+                    .map_err(|_| (request_id.clone(), RoboatError::InternalServerError))?;
 
                 // Optionally fetch the original asset's name so the reupload keeps it.
                 let asset_name = if ctx.keep_names {
@@ -94,14 +106,10 @@ impl UploadContext {
 
                 ctx.rate_limiter.wait_if_limited().await;
 
+                let old_id_str = request_id.clone().unwrap_or_else(|| "unknown".to_string());
+
                 let new_asset_id = ctx
-                    .upload_asset_with_retry(
-                        asset_bytes,
-                        asset_type,
-                        index,
-                        request_id.clone().unwrap_or_else(|| "unknown".to_string()),
-                        asset_name,
-                    )
+                    .upload_asset_with_retry(asset_bytes, asset_type, &old_id_str, asset_name)
                     .await
                     .map_err(|e| (request_id.clone(), e))?;
 
@@ -117,8 +125,7 @@ impl UploadContext {
         &self,
         asset_bytes: Bytes,
         asset_type: roboat::catalog::AssetType,
-        index: usize,
-        request_id: String,
+        request_id: &str,
         asset_name: Option<String>,
     ) -> Result<String, RoboatError> {
         let mut last_error = None;
@@ -130,14 +137,15 @@ impl UploadContext {
                 .await
             {
                 Ok(new_asset_id) => {
+                    let done = self.completed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    let remaining = self.total_assets.saturating_sub(done);
                     info!(
-                        "[{:?}] Success uploading {} - {}/{} ({} remaining)",
-                        asset_type,
-                        request_id,
-                        index + 1,
-                        self.total_assets,
-                        self.total_assets - (index + 1)
+                        "[{:?}] Success uploading {} -> {} - {}/{} ({} remaining)",
+                        asset_type, request_id, new_asset_id, done, self.total_assets, remaining
                     );
+                    if let Some(ref cb) = self.on_progress {
+                        cb(done, self.total_assets, request_id, &new_asset_id);
+                    }
                     return Ok(new_asset_id);
                 }
                 Err(e) => {
@@ -166,7 +174,7 @@ impl UploadContext {
             }
         }
 
-        Err(last_error.unwrap())
+        Err(last_error.unwrap_or(RoboatError::InternalServerError))
     }
 }
 
@@ -202,14 +210,11 @@ pub async fn collect_upload_results(
     }
 
     info!(
-        "Upload summary: {} failed out of {} total tasks",
+        "Upload summary: {} succeeded, {} failed out of {} total tasks",
+        finished_asset_hashmap.len(),
         errors.len(),
         total_tasks
     );
 
     Ok(finished_asset_hashmap)
 }
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================

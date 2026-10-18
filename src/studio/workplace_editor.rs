@@ -7,7 +7,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use ustr::Ustr;
 
@@ -19,7 +19,8 @@ impl StudioParser {
     /// Gets all animation instances in the file, scans their animationId then replaces them if a
     /// new one is provided.
     ///
-    /// Handles both `rbxassetid://{id}` and `roblox.com/asset/?id={id}` content IDs.
+    /// Handles both `rbxassetid://{id}` and `roblox.com/asset/?id={id}` content IDs across
+    /// both `Variant::ContentId` and `Variant::String` representations.
     pub fn update_game_animations(&mut self, animation_mapping: &HashMap<String, String>) {
         if animation_mapping.is_empty() {
             return;
@@ -33,17 +34,20 @@ impl StudioParser {
             .collect();
 
         for animation_ref in animation_instances_referent {
-            if let Some(instance) = self.dom.get_by_ref_mut(animation_ref)
-                && let Some(Variant::ContentId(content_id)) =
-                    instance.properties.get(&ANIMATION_ID_KEY)
-            {
-                let raw = content_id.as_str();
-                let old_id = match DIGIT_RE.find(raw) {
-                    Some(mat) => mat.as_str(),
-                    None => continue,
+            if let Some(instance) = self.dom.get_by_ref_mut(animation_ref) {
+                let matched_new_id = match instance.properties.get(&ANIMATION_ID_KEY) {
+                    Some(Variant::ContentId(content_id)) => DIGIT_RE
+                        .find(content_id.as_str())
+                        .and_then(|mat| animation_mapping.get(mat.as_str()))
+                        .cloned(),
+                    Some(Variant::String(s)) => DIGIT_RE
+                        .find(s.as_str())
+                        .and_then(|mat| animation_mapping.get(mat.as_str()))
+                        .cloned(),
+                    _ => None,
                 };
-                if let Some(new_id) = animation_mapping.get(old_id) {
-                    // Replace the AnimationId with the new one, normalizing the format
+
+                if let Some(new_id) = matched_new_id {
                     let rbxasset = format!("rbxassetid://{}", new_id);
                     instance
                         .properties
@@ -53,7 +57,8 @@ impl StudioParser {
         }
     }
 
-    /// Saves the DOM to a .rbxl file.
+    /// Saves the DOM to a `.rbxl` or `.rbxlx` file atomically using a temporary file
+    /// to prevent data loss or truncation if an I/O error occurs mid-write.
     ///
     /// # Examples
     ///
@@ -74,8 +79,7 @@ impl StudioParser {
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("File path is not valid UTF-8: {:?}", path))?;
         let expanded_path = shellexpand::full(path_str)?;
-        let file = File::create(expanded_path.as_ref())?;
-        let mut writer = BufWriter::new(file);
+        let target_path = Path::new(expanded_path.as_ref());
 
         // Get the children of the root instead of the root
         let root_children = self
@@ -84,12 +88,45 @@ impl StudioParser {
             .ok_or_else(|| anyhow::anyhow!("DOM root not found"))?
             .children();
 
-        if is_xml_file(expanded_path.as_ref()) {
-            to_xml(&mut writer, &self.dom, root_children)?;
-        } else {
-            to_binary(&mut writer, &self.dom, root_children)?;
+        let is_xml = is_xml_file(target_path);
+
+        // Write to a sibling temporary file first so an in-place save never truncates the original file on error
+        let mut tmp_os = target_path.as_os_str().to_os_string();
+        tmp_os.push(".tmp_rar");
+        let tmp_path = PathBuf::from(tmp_os);
+
+        let write_result = (|| -> Result<(), anyhow::Error> {
+            let file = File::create(&tmp_path)?;
+            let mut writer = BufWriter::with_capacity(256 * 1024, file);
+
+            if is_xml {
+                to_xml(&mut writer, &self.dom, root_children)?;
+            } else {
+                to_binary(&mut writer, &self.dom, root_children)?;
+            }
+            writer.flush()?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
         }
-        writer.flush()?;
+
+        if let Err(e) = std::fs::rename(&tmp_path, target_path) {
+            // Fallback copy if rename across mount points fails
+            if std::fs::copy(&tmp_path, target_path).is_ok() {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Ok(());
+            }
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(anyhow::anyhow!(
+                "Failed to finalize saved file '{}': {}",
+                target_path.display(),
+                e
+            ));
+        }
+
         Ok(())
     }
 }

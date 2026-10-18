@@ -1,26 +1,25 @@
-use animation_replace_roblox::StudioParser;
-use animation_replace_roblox::asset_manager::uploader::AssetUploader;
+use animation_replace_roblox::{StudioParser, scan_windows_credential_for_cookie};
 use clap::Parser;
 use roboat::assetdelivery::AssetBatchResponse;
 use roboat::catalog::AssetType;
 use std::collections::HashSet;
+use std::fmt;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
-use tracing::{info, warn};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing::{error, info, warn};
+use tracing_subscriber::{EnvFilter, fmt as tracing_fmt, prelude::*};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 struct Args {
-    /// .ROBLOSECURITY cookie string [WARNING STRING REQUIRED]
-    #[arg(long, short)]
+    /// .ROBLOSECURITY cookie string [Optional on Windows - auto-detected from Roblox Studio if omitted]
+    #[arg(long, short, default_value = "")]
     cookie: String,
 
     /// Open cloud API Key [optional - uses Roblox Studio cookie upload if omitted]
-    #[arg(long, default_value = "")]
+    #[arg(long, short, default_value = "")]
     api_key: String,
 
-    /// file PATH of the .rbxl file [REQUIRED]
+    /// file PATH of the .rbxl / .rbxlx file [REQUIRED]
     #[arg(long, short)]
     file: String,
 
@@ -28,11 +27,11 @@ struct Args {
     #[arg(long, short)]
     output: Option<String>,
 
-    /// Required if the the game will be published to a Group [Id of the group]
+    /// Required if the game will be published to a Group [Id of the group]
     #[arg(long, short)]
     group: Option<u64>,
 
-    /// How many concurrent tasks using semaphore. [defaulted to 5]
+    /// How many concurrent tasks using semaphore. [defaulted to 50]
     #[arg(long, short)]
     threads: Option<u64>,
 
@@ -41,13 +40,36 @@ struct Args {
     unformatted_ids: bool,
 
     /// Scan and report what would change without uploading or saving anything.
-    #[arg(long)]
+    #[arg(long, short)]
     dry_run: bool,
 
     /// Reuploaded animations keep the original asset names (one extra API call
     /// per animation).
-    #[arg(long)]
+    #[arg(long, short)]
     keep_names: bool,
+}
+
+impl fmt::Debug for Args {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Args")
+            .field("cookie", &"[REDACTED]")
+            .field(
+                "api_key",
+                if self.api_key.is_empty() {
+                    &"[EMPTY]"
+                } else {
+                    &"[REDACTED]"
+                },
+            )
+            .field("file", &self.file)
+            .field("output", &self.output)
+            .field("group", &self.group)
+            .field("threads", &self.threads)
+            .field("unformatted_ids", &self.unformatted_ids)
+            .field("dry_run", &self.dry_run)
+            .field("keep_names", &self.keep_names)
+            .finish()
+    }
 }
 
 fn cleanup_old_logs(log_dir: &str, prefix: &str, keep: usize) {
@@ -114,7 +136,7 @@ async fn main() {
     tracing_subscriber::registry()
         // stdout: info and above
         .with(
-            fmt::layer()
+            tracing_fmt::layer()
                 .with_writer(std::io::stdout)
                 .with_target(false)
                 .with_thread_ids(false)
@@ -124,18 +146,32 @@ async fn main() {
         )
         // file: debug and above
         .with(
-            fmt::layer()
+            tracing_fmt::layer()
                 .with_writer(non_blocking)
                 .with_ansi(false)
                 .with_filter(EnvFilter::new("debug")),
         )
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    if args.cookie.trim().is_empty() {
+        info!("No --cookie provided; attempting to auto-detect Roblox Studio session...");
+        if let Some(detected) = scan_windows_credential_for_cookie() {
+            args.cookie = detected;
+            info!("Successfully auto-detected .ROBLOSECURITY cookie from Roblox Studio!");
+        } else {
+            error!(
+                "No .ROBLOSECURITY cookie provided and could not auto-detect from Roblox Studio. Please pass --cookie <COOKIE> or log into Roblox Studio."
+            );
+            return;
+        }
+    }
+
     let file_path = shellexpand::tilde(&args.file).to_string();
     let mut seen_ids: HashSet<String> = HashSet::new();
 
-    // Build the parser with the roboat client
+    // Build the parser with the shared roboat client
     let builder = StudioParser::builder()
         .file_path(&file_path)
         .api_key(&args.api_key)
@@ -144,7 +180,7 @@ async fn main() {
     let mut parser = match builder.build() {
         Ok(parser) => parser,
         Err(e) => {
-            warn!("Error loading file: {}", e);
+            error!("Error loading file: {}", e);
             return;
         }
     };
@@ -181,11 +217,10 @@ async fn main() {
     }
 
     info!(
-        "Total Animations fetched from game {}",
+        "Total Animations fetched from game: {}",
         all_animations.len()
     );
-
-    info!("Total Audios fetched from game {}", all_audios.len());
+    info!("Total Audios fetched from game: {}", all_audios.len());
 
     if args.dry_run {
         info!("Dry-run mode enabled: no uploads or file changes will be made.");
@@ -198,26 +233,41 @@ async fn main() {
         return;
     }
 
-    let uploader = Arc::new(AssetUploader::new(args.cookie, args.api_key));
+    if all_animations.is_empty() {
+        info!("No animations found to replace. Exiting without modifying file.");
+        return;
+    }
+
+    let Ok(uploader) = parser.animation_uploader() else {
+        error!("Invalid authentication credentials.");
+        return;
+    };
+
     match uploader
         .reupload_all_assets(all_animations, args.group, args.threads, args.keep_names)
         .await
     {
         Ok(animation_mapping) => {
-            // Apply the old→new ID mapping to both script sources and Animation instances
-            // in a single unified pass.
+            if animation_mapping.is_empty() {
+                warn!("No animations were successfully uploaded; skipping file save.");
+                return;
+            }
             parser.update_script_animations(&animation_mapping, args.unformatted_ids);
             parser.update_game_animations(&animation_mapping);
+
+            let target_path = args.output.as_deref().unwrap_or(&file_path);
+            if let Err(e) = parser.save_to_rbxl(target_path) {
+                error!("Failed to save output to {}: {}", target_path, e);
+            } else {
+                info!(
+                    "Successfully replaced {} animations and saved place file to {}",
+                    animation_mapping.len(),
+                    target_path
+                );
+            }
         }
         Err(e) => {
-            warn!("Failed to upload animations: {:?}", e);
+            error!("Failed to upload animations: {:?}", e);
         }
-    }
-
-    let target_path = args.output.as_deref().unwrap_or(&file_path);
-    if let Err(e) = parser.save_to_rbxl(target_path) {
-        warn!("Failed to save output to {}: {}", target_path, e);
-    } else {
-        info!("Successfully saved place file to {}", target_path);
     }
 }

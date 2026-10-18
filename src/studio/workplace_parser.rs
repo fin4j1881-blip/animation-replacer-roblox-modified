@@ -1,13 +1,14 @@
-use crate::StudioParser;
+use crate::{AssetUploader, StudioParser};
 use rbx_binary::from_reader as from_binary;
 use rbx_types::Variant;
 use rbx_xml::from_reader_default as from_xml;
 use regex::Regex;
 use roboat::assetdelivery::AssetBatchResponse;
+use std::fmt;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use ustr::Ustr;
 
 static DIGIT_RE: LazyLock<Regex> =
@@ -42,6 +43,9 @@ impl StudioParser {
                     Some(Variant::ContentId(content_id)) => DIGIT_RE
                         .find(content_id.as_str())
                         .and_then(|mat| mat.as_str().parse::<u64>().ok()),
+                    Some(Variant::String(s)) => DIGIT_RE
+                        .find(s.as_str())
+                        .and_then(|mat| mat.as_str().parse::<u64>().ok()),
                     _ => None,
                 },
             )
@@ -73,11 +77,24 @@ impl StudioParser {
 }
 
 /// Builder for creating StudioParser instances with optional authentication.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct StudioParserBuilder {
     file_path: Option<String>,
     roblosecurity: Option<String>,
     api_key: Option<String>,
+}
+
+impl fmt::Debug for StudioParserBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StudioParserBuilder")
+            .field("file_path", &self.file_path)
+            .field(
+                "roblosecurity",
+                &self.roblosecurity.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 impl StudioParserBuilder {
@@ -113,7 +130,7 @@ impl StudioParserBuilder {
 
         let file = File::open(expanded_path.as_ref())
             .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", expanded_path, e))?;
-        let reader = BufReader::new(file);
+        let reader = BufReader::with_capacity(256 * 1024, file);
 
         let dom = if is_xml_file(expanded_path.as_ref()) {
             from_xml(reader).map_err(|e| anyhow::anyhow!("Failed to parse .rbxlx DOM: {}", e))?
@@ -121,10 +138,19 @@ impl StudioParserBuilder {
             from_binary(reader).map_err(|e| anyhow::anyhow!("Failed to parse .rbxl DOM: {}", e))?
         };
 
+        let uploader = match &self.roblosecurity {
+            Some(cookie) if !cookie.trim().is_empty() => {
+                let api_key = self.api_key.clone().unwrap_or_default();
+                Some(Arc::new(AssetUploader::new(cookie.clone(), api_key)))
+            }
+            _ => None,
+        };
+
         Ok(StudioParser {
             roblosecurity: self.roblosecurity,
             api_key: self.api_key,
             dom,
+            uploader,
         })
     }
 }

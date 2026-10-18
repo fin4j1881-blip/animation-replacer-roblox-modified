@@ -9,6 +9,7 @@ pub mod studio;
 /// A module for handling parsing and editing on scripts, in studio files.
 pub mod script;
 
+pub use asset_manager::credentials::scan_windows_credential_for_cookie;
 pub use asset_manager::uploader::AssetUploader;
 pub use studio::workplace_parser::StudioParserBuilder;
 
@@ -34,11 +35,13 @@ impl<'a> Animation<'a> {
         }
     }
 }
-/// Parser for Roblox Studio files with optional authentication.
+
+/// Parser for Roblox Studio files with optional authentication and shared uploader cache.
 pub struct StudioParser {
     pub roblosecurity: Option<String>,
     pub api_key: Option<String>,
     pub dom: WeakDom,
+    pub uploader: Option<std::sync::Arc<AssetUploader>>,
 }
 
 /// Represents a script with its instance, source code and type.

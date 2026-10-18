@@ -1,13 +1,22 @@
-use animation_replace_roblox::StudioParser;
-use animation_replace_roblox::asset_manager::uploader::AssetUploader;
+use animation_replace_roblox::{StudioParser, scan_windows_credential_for_cookie};
 use roboat::assetdelivery::AssetBatchResponse;
 use roboat::catalog::AssetType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::fmt;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
-#[derive(Debug, Serialize, Deserialize)]
+static GUI_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .pool_max_idle_per_host(10)
+        .build()
+        .unwrap_or_default()
+});
+
+#[derive(Serialize, Deserialize)]
 pub struct ReplacementConfig {
     pub cookie: String,
     pub api_key: String,
@@ -18,6 +27,22 @@ pub struct ReplacementConfig {
     pub unformatted_ids: bool,
     pub dry_run: bool,
     pub keep_names: bool,
+}
+
+impl fmt::Debug for ReplacementConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplacementConfig")
+            .field("cookie", &"[REDACTED]")
+            .field("api_key", &"[REDACTED]")
+            .field("file", &self.file)
+            .field("output", &self.output)
+            .field("group", &self.group)
+            .field("threads", &self.threads)
+            .field("unformatted_ids", &self.unformatted_ids)
+            .field("dry_run", &self.dry_run)
+            .field("keep_names", &self.keep_names)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,7 +260,7 @@ async fn run_replacement(
         });
     }
 
-    // 3. Upload animations
+    // 3. Upload animations (reusing shared uploader & caches from StudioParser)
     emit_log(
         &app,
         "info",
@@ -247,19 +272,45 @@ async fn run_replacement(
     );
     emit_progress(&app, 50, 100, "Reuploading Assets");
 
-    let uploader = Arc::new(AssetUploader::new(config.cookie, config.api_key));
+    let uploader = parser
+        .animation_uploader()
+        .map_err(|e| format!("Uploader initialization error: {}", e))?;
+
+    let app_for_cb = app.clone();
+    let progress_cb = Arc::new(
+        move |done: usize, total: usize, old_id: &str, new_id: &str| {
+            let scaled = 50 + ((done * 35) / total.max(1));
+            emit_progress(&app_for_cb, scaled, 100, "Reuploading Assets");
+            emit_log(
+                &app_for_cb,
+                "info",
+                format!(
+                    "Uploaded animation {} -> {} ({}/{})",
+                    old_id, new_id, done, total
+                ),
+            );
+        },
+    );
 
     let mapping = uploader
-        .reupload_all_assets(
+        .reupload_all_assets_with_progress(
             all_animations,
             config.group,
             config.threads,
             config.keep_names,
+            Some(progress_cb),
         )
         .await
         .map_err(|e| format!("Upload error: {}", e))?;
 
     let replaced_count = mapping.len();
+    if replaced_count == 0 {
+        return Err(
+            "Failed to upload any animations. Check your cookie permissions or group role."
+                .to_string(),
+        );
+    }
+
     emit_log(
         &app,
         "info",
@@ -277,8 +328,12 @@ async fn run_replacement(
     parser.update_script_animations(&mapping, config.unformatted_ids);
     parser.update_game_animations(&mapping);
 
-    // 5. Save file
-    let target_save = config.output.as_deref().unwrap_or(&file_path);
+    // 5. Save file atomically
+    let target_save = config
+        .output
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&file_path);
     emit_log(
         &app,
         "info",
@@ -305,7 +360,7 @@ async fn run_replacement(
     })
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct DetectedAccount {
     pub found: bool,
     pub cookie: String,
@@ -315,132 +370,17 @@ pub struct DetectedAccount {
     pub message: String,
 }
 
-#[cfg(target_os = "windows")]
-fn scan_windows_credential_for_cookie() -> Option<String> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-
-    #[repr(C)]
-    #[allow(clippy::upper_case_acronyms)]
-    struct CREDENTIALW {
-        flags: u32,
-        cred_type: u32,
-        target_name: *mut u16,
-        comment: *mut u16,
-        last_written: [u32; 2],
-        credential_blob_size: u32,
-        credential_blob: *mut u8,
-        persist: u32,
-        attribute_count: u32,
-        attributes: *mut std::ffi::c_void,
-        target_alias: *mut u16,
-        user_name: *mut u16,
+impl fmt::Debug for DetectedAccount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DetectedAccount")
+            .field("found", &self.found)
+            .field("cookie", &"[REDACTED]")
+            .field("user_id", &self.user_id)
+            .field("username", &self.username)
+            .field("display_name", &self.display_name)
+            .field("message", &self.message)
+            .finish()
     }
-
-    #[link(name = "advapi32")]
-    unsafe extern "system" {
-        fn CredEnumerateW(
-            filter: *const u16,
-            flags: u32,
-            count: *mut u32,
-            credentials: *mut *mut *mut CREDENTIALW,
-        ) -> i32;
-        fn CredReadW(
-            target_name: *const u16,
-            cred_type: u32,
-            flags: u32,
-            credential: *mut *mut CREDENTIALW,
-        ) -> i32;
-        fn CredFree(buffer: *mut std::ffi::c_void);
-    }
-
-    unsafe {
-        // First try to enumerate targets matching RobloxStudioAuth*
-        let filter: Vec<u16> = OsStr::new("https://www.roblox.com:RobloxStudioAuth*")
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-
-        let mut count: u32 = 0;
-        let mut creds_ptr: *mut *mut CREDENTIALW = std::ptr::null_mut();
-
-        if CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut creds_ptr) != 0
-            && !creds_ptr.is_null()
-        {
-            let slice = std::slice::from_raw_parts(creds_ptr, count as usize);
-            for &c_ptr in slice {
-                if c_ptr.is_null() {
-                    continue;
-                }
-                let c = &*c_ptr;
-                let blob_len = c.credential_blob_size as usize;
-                let blob = std::slice::from_raw_parts(c.credential_blob, blob_len);
-
-                let parsed = String::from_utf8(blob.to_vec()).ok().or_else(|| {
-                    if blob_len.is_multiple_of(2) {
-                        let u16_slice = std::slice::from_raw_parts(
-                            c.credential_blob as *const u16,
-                            blob_len / 2,
-                        );
-                        String::from_utf16(u16_slice).ok()
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(s) = parsed {
-                    let trimmed = s.trim().to_string();
-                    if trimmed.starts_with("_|WARNING:-DO-NOT-SHARE-THIS") {
-                        CredFree(creds_ptr as *mut std::ffi::c_void);
-                        return Some(trimmed);
-                    }
-                }
-            }
-            CredFree(creds_ptr as *mut std::ffi::c_void);
-        }
-
-        // Fallback: try direct targets
-        let targets = [
-            "https://www.roblox.com:RobloxStudioAuthCookies",
-            "https://www.roblox.com:RobloxStudioAuth.ROBLOSECURITY",
-        ];
-
-        for t in targets {
-            let wide: Vec<u16> = OsStr::new(t).encode_wide().chain(Some(0)).collect();
-            let mut ptr: *mut CREDENTIALW = std::ptr::null_mut();
-            if CredReadW(wide.as_ptr(), 1, 0, &mut ptr) != 0 && !ptr.is_null() {
-                let c = &*ptr;
-                let blob_len = c.credential_blob_size as usize;
-                let blob = std::slice::from_raw_parts(c.credential_blob, blob_len);
-                let parsed = String::from_utf8(blob.to_vec()).ok().or_else(|| {
-                    if blob_len.is_multiple_of(2) {
-                        let u16_slice = std::slice::from_raw_parts(
-                            c.credential_blob as *const u16,
-                            blob_len / 2,
-                        );
-                        String::from_utf16(u16_slice).ok()
-                    } else {
-                        None
-                    }
-                });
-                CredFree(ptr as *mut std::ffi::c_void);
-
-                if let Some(s) = parsed {
-                    let trimmed = s.trim().to_string();
-                    if trimmed.starts_with("_|WARNING:-DO-NOT-SHARE-THIS") {
-                        return Some(trimmed);
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(not(target_os = "windows"))]
-fn scan_windows_credential_for_cookie() -> Option<String> {
-    None
 }
 
 #[tauri::command]
@@ -457,8 +397,7 @@ async fn auto_detect_cookie() -> Result<DetectedAccount, String> {
     };
 
     // Verify cookie and fetch authenticated user info from Roblox API
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = GUI_HTTP_CLIENT
         .get("https://users.roblox.com/v1/users/authenticated")
         .header("Cookie", format!(".ROBLOSECURITY={}", cookie))
         .send()
@@ -502,11 +441,21 @@ async fn auto_detect_cookie() -> Result<DetectedAccount, String> {
     })
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct GeneratedApiKeyResult {
     pub created: bool,
     pub api_key: String,
     pub message: String,
+}
+
+impl fmt::Debug for GeneratedApiKeyResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GeneratedApiKeyResult")
+            .field("created", &self.created)
+            .field("api_key", &"[REDACTED]")
+            .field("message", &self.message)
+            .finish()
+    }
 }
 
 #[tauri::command]
@@ -520,7 +469,6 @@ async fn auto_generate_api_key(cookie: String) -> Result<GeneratedApiKeyResult, 
         cookie.trim().to_string()
     };
 
-    let client = reqwest::Client::new();
     let cookie_header = format!(".ROBLOSECURITY={}", active_cookie);
 
     let payload = serde_json::json!({
@@ -541,7 +489,7 @@ async fn auto_generate_api_key(cookie: String) -> Result<GeneratedApiKeyResult, 
 
     let mut xcsrf = String::new();
     for _ in 0..2 {
-        let mut req = client
+        let mut req = GUI_HTTP_CLIENT
             .post("https://apis.roblox.com/cloud-authentication/v1/apiKey")
             .header("Cookie", &cookie_header)
             .header("Content-Type", "application/json");
@@ -592,7 +540,20 @@ async fn auto_generate_api_key(cookie: String) -> Result<GeneratedApiKeyResult, 
 
 #[tauri::command]
 async fn open_browser_url(url: String) -> Result<(), String> {
-    open::that(&url).map_err(|e| e.to_string())
+    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("Invalid URL: {}", e))?;
+    if parsed.scheme() != "https" {
+        return Err("Only HTTPS URLs are allowed.".to_string());
+    }
+    let allowed_host = parsed.host_str().is_some_and(|host| {
+        host == "roblox.com"
+            || host.ends_with(".roblox.com")
+            || host == "github.com"
+            || host.ends_with(".github.com")
+    });
+    if !allowed_host {
+        return Err("URL domain is not in the allowed list.".to_string());
+    }
+    open::that(parsed.as_str()).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

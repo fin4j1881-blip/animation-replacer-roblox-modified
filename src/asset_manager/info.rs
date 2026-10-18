@@ -34,13 +34,15 @@ impl AssetUploader {
         Ok(animations)
     }
 
-    /// Downloads file bytes from a URL with retry logic using the shared connection pool.
+    /// Downloads file bytes from a URL with HTTP status validation and retry logic using the shared connection pool.
     pub async fn file_bytes_from_url<S: AsRef<str>>(&self, url: S) -> Result<Bytes, RoboatError> {
         const MAX_RETRIES: usize = 3;
         const TIMEOUT_SECS: u64 = 15;
         let url_ref = url.as_ref();
 
         for attempt in 1..=MAX_RETRIES {
+            self.rate_limiter.wait_if_limited().await;
+
             let result = tokio::time::timeout(
                 Duration::from_secs(TIMEOUT_SECS),
                 self.http_client.get(url_ref).send(),
@@ -49,15 +51,44 @@ impl AssetUploader {
 
             match result {
                 Ok(Ok(response)) => {
-                    return response.bytes().await.map_err(RoboatError::ReqwestError);
+                    let status = response.status();
+                    if status.as_u16() == 429 {
+                        let sleep_secs = (attempt as u64) * 5;
+                        self.rate_limiter.set_rate_limit(sleep_secs).await;
+                        self.rate_limiter.wait_if_limited().await;
+                        if attempt == MAX_RETRIES {
+                            return Err(RoboatError::TooManyRequests);
+                        }
+                        continue;
+                    }
+                    if status.is_server_error() {
+                        if attempt == MAX_RETRIES {
+                            return Err(RoboatError::InternalServerError);
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    if !status.is_success() {
+                        return Err(RoboatError::BadRequest);
+                    }
+
+                    let bytes = response.bytes().await.map_err(RoboatError::ReqwestError)?;
+                    if bytes.is_empty() {
+                        if attempt == MAX_RETRIES {
+                            return Err(RoboatError::MalformedResponse);
+                        }
+                        continue;
+                    }
+                    return Ok(bytes);
                 }
                 Ok(Err(e)) => {
                     if attempt == MAX_RETRIES {
                         return Err(RoboatError::ReqwestError(e));
                     }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 Err(e) => {
-                    error!("Getting file from animation url error: {:?}", e);
+                    error!("Getting file from animation url timed out: {:?}", e);
                     if attempt == MAX_RETRIES {
                         return Err(RoboatError::InternalServerError);
                     }
@@ -91,7 +122,7 @@ async fn fetch_single_batch(
     let mut success_responses = Vec::new();
     let mut failed_ids: HashMap<u64, Vec<u64>> = HashMap::new();
 
-    attempt_batch_fetch(
+    let batch_res = attempt_batch_fetch(
         uploader,
         asset_ids,
         init_place_id,
@@ -100,18 +131,20 @@ async fn fetch_single_batch(
         &mut place_id_cache,
         &mut failed_creators,
     )
-    .await?;
+    .await;
 
-    let mut resolved = resolve_failed_assets(uploader, failed_ids).await;
-    success_responses.append(&mut resolved);
-
-    // Save newly discovered place IDs and failed creators back to uploader's persistent cache
+    // Always persist newly discovered place IDs and failed creators back to uploader's cache
     {
         let mut global_place_cache = uploader.place_id_cache.write().await;
         global_place_cache.extend(place_id_cache);
         let mut global_failed = uploader.failed_creators.write().await;
         global_failed.extend(failed_creators);
     }
+
+    batch_res?;
+
+    let mut resolved = resolve_failed_assets(uploader, failed_ids).await;
+    success_responses.append(&mut resolved);
 
     Ok(success_responses)
 }
@@ -255,7 +288,7 @@ async fn handle_fetch_error(
     Ok(false)
 }
 
-/// Resolves failed assets by retrying with correct place IDs.
+/// Resolves failed assets by retrying with correct place IDs and rate-limit backoff.
 async fn resolve_failed_assets(
     uploader: &AssetUploader,
     asset_and_places: HashMap<u64, Vec<u64>>,
@@ -263,23 +296,44 @@ async fn resolve_failed_assets(
     let mut resolved_responses = Vec::new();
 
     for (place_id, vec_assets) in asset_and_places {
-        let payload = create_batch_payloads(&vec_assets);
+        let mut attempts = 0;
+        loop {
+            uploader.rate_limiter.wait_if_limited().await;
+            let payload = create_batch_payloads(&vec_assets);
 
-        match check_asset_metadata(uploader, payload, place_id, Duration::from_secs(5)).await {
-            Ok(Some(responses)) => {
-                for response in responses {
-                    if response.errors.is_none() {
-                        resolved_responses.push(response);
-                    } else {
-                        error!(
-                            "Failed to resolve asset {:?} with place_id {}",
-                            response.request_id, place_id
-                        );
+            match check_asset_metadata(
+                uploader,
+                payload,
+                place_id,
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            )
+            .await
+            {
+                Ok(Some(responses)) => {
+                    for response in responses {
+                        if response.errors.is_none() {
+                            resolved_responses.push(response);
+                        } else {
+                            error!(
+                                "Failed to resolve asset {:?} with place_id {}",
+                                response.request_id, place_id
+                            );
+                        }
                     }
+                    break;
                 }
+                Ok(None) => {
+                    warn!("No response for place_id {}", place_id);
+                    break;
+                }
+                Err(e) => match handle_fetch_error(uploader, &e, &mut attempts).await {
+                    Ok(true) => continue,
+                    _ => {
+                        error!("Error resolving assets for place_id {}: {:?}", place_id, e);
+                        break;
+                    }
+                },
             }
-            Ok(None) => warn!("No response for place_id {}", place_id),
-            Err(e) => error!("Error resolving assets for place_id {}: {:?}", place_id, e),
         }
     }
 

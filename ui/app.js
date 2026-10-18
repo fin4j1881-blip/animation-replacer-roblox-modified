@@ -97,6 +97,7 @@ function translateStage(stage) {
     case "Completed":
     case "Completed (Dry Run)":
     case "Finished": return t("stageFinished");
+    case "Initializing":
     case "Starting...": return t("stageInit");
     case "Error": return t("stageError");
     case "Idle": return t("idle");
@@ -292,6 +293,8 @@ function saveCredentials() {
   }
 }
 
+rememberCreds.addEventListener("change", saveCredentials);
+
 // Toggle Password Visibility
 toggleCookieBtn.addEventListener("click", () => {
   cookieInput.type = cookieInput.type === "password" ? "text" : "password";
@@ -341,13 +344,17 @@ clearOutputBtn.addEventListener("click", () => {
   outputInput.value = "";
 });
 
-// Console Log Handler
+// Console Log Handler (capped at 500 entries to prevent DOM memory bloat on massive places)
+const MAX_LOG_LINES = 500;
 function addLog(level, message) {
   const line = document.createElement("div");
   line.className = `log-line log-${level}`;
   const time = new Date().toLocaleTimeString();
   line.textContent = `[${time}] [${level.toUpperCase()}] ${message}`;
   consoleBody.appendChild(line);
+  while (consoleBody.children.length > MAX_LOG_LINES) {
+    consoleBody.removeChild(consoleBody.firstChild);
+  }
   consoleBody.scrollTop = consoleBody.scrollHeight;
 }
 

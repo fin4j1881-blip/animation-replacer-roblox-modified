@@ -2,17 +2,21 @@ use bytes::Bytes;
 use roboat::ClientBuilder;
 use roboat::RoboatError;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use super::ratelimiter::RateLimiter;
-use super::tasks::{UploadContext, collect_upload_results};
+use super::tasks::{ProgressCallback, UploadContext, collect_upload_results};
+
 const DEFAULT_CONCURRENT_TASKS: u64 = 50;
 const DEFAULT_ANIMATION_NAME: &str = "reuploaded_animation";
 const DEFAULT_ANIMATION_DESCRIPTION: &str = "This is an example";
 const MAX_NAME_FETCH_RETRIES: usize = 3;
+const MAX_POLL_ATTEMPTS: usize = 60;
+const UPLOAD_TIMEOUT_SECS: u64 = 30;
 
 pub struct AssetUploader {
     pub roblosecurity: String,
@@ -25,8 +29,24 @@ pub struct AssetUploader {
     pub(super) xcsrf_token: RwLock<String>,
 }
 
+impl fmt::Debug for AssetUploader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AssetUploader")
+            .field("roblosecurity", &"[REDACTED]")
+            .field(
+                "api_key",
+                if self.api_key.is_empty() {
+                    &"[EMPTY]"
+                } else {
+                    &"[REDACTED]"
+                },
+            )
+            .finish()
+    }
+}
+
 impl AssetUploader {
-    /// Creates a new AnimationUploader with a roblosecurity cookie.
+    /// Creates a new AssetUploader with a roblosecurity cookie and optional Open Cloud API key.
     pub fn new(roblosecurity: String, api_key: String) -> Self {
         let http_client = reqwest::Client::builder()
             .pool_max_idle_per_host(50)
@@ -56,6 +76,7 @@ impl AssetUploader {
     /// name. Returns `None` if the asset cannot be fetched.
     pub async fn fetch_asset_display_name(&self, asset_id: u64) -> Option<String> {
         for attempt in 1..=MAX_NAME_FETCH_RETRIES {
+            self.rate_limiter.wait_if_limited().await;
             match self.roboat_client.get_asset_info(asset_id).await {
                 Ok(info) => {
                     let name = info.display_name.trim().to_string();
@@ -120,6 +141,7 @@ impl AssetUploader {
             let mut req = self
                 .http_client
                 .post(url.clone())
+                .timeout(Duration::from_secs(UPLOAD_TIMEOUT_SECS))
                 .header("Cookie", &cookie_header)
                 .header("User-Agent", "RobloxStudio/WinInet")
                 .header("Content-Type", "application/octet-stream")
@@ -150,6 +172,10 @@ impl AssetUploader {
 
             if resp.status().as_u16() == 429 {
                 return Err(RoboatError::TooManyRequests);
+            }
+
+            if resp.status().is_server_error() {
+                return Err(RoboatError::InternalServerError);
             }
 
             if !resp.status().is_success() {
@@ -193,7 +219,7 @@ impl AssetUploader {
             )
             .await?;
 
-        loop {
+        for _ in 0..MAX_POLL_ATTEMPTS {
             let operation = self
                 .roboat_client
                 .poll_upload_operation(self.api_key.clone(), resp.path.clone())
@@ -206,8 +232,14 @@ impl AssetUploader {
                 }
                 return Err(RoboatError::InternalServerError);
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
+
+        warn!(
+            "Timed out waiting for Open Cloud upload operation '{}' after {}s",
+            resp.path, MAX_POLL_ATTEMPTS
+        );
+        Err(RoboatError::InternalServerError)
     }
 
     /// Reuploads multiple animations concurrently.
@@ -221,6 +253,19 @@ impl AssetUploader {
         task_count: Option<u64>,
         keep_names: bool,
     ) -> Result<HashMap<String, String>, RoboatError> {
+        self.reupload_all_assets_with_progress(assets, group_id, task_count, keep_names, None)
+            .await
+    }
+
+    /// Reuploads multiple animations concurrently with an optional real-time progress callback.
+    pub async fn reupload_all_assets_with_progress(
+        self: Arc<Self>,
+        assets: Vec<roboat::assetdelivery::AssetBatchResponse>,
+        group_id: Option<u64>,
+        task_count: Option<u64>,
+        keep_names: bool,
+        on_progress: Option<ProgressCallback>,
+    ) -> Result<HashMap<String, String>, RoboatError> {
         let max_concurrent_tasks = task_count.unwrap_or(DEFAULT_CONCURRENT_TASKS);
         let total_assets = assets.len();
 
@@ -230,6 +275,7 @@ impl AssetUploader {
             max_concurrent_tasks,
             total_assets,
             keep_names,
+            on_progress,
         );
 
         let tasks = ctx.spawn_upload_tasks(assets);

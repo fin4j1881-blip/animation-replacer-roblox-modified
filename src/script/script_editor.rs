@@ -10,7 +10,7 @@ static SOURCE_KEY: LazyLock<Ustr> = LazyLock::new(|| Ustr::from("Source"));
 static UNFORMATTED_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d{6,}\b").expect("static regex must compile"));
 static FORMATTED_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(rbxassetid://|roblox\.com/asset/\?id=)(\d{6,})")
+    Regex::new(r"(rbxassetid://|roblox\.com/asset/?\?id=)(\d{6,})")
         .expect("static regex must compile")
 });
 
@@ -100,10 +100,11 @@ mod tests {
     #[test]
     fn formatted_replaces_asset_url_ids() {
         let map = mapping(&[("123456", "999999")]);
-        let source = r#"local a = "rbxassetid://123456" local b = "roblox.com/asset/?id=123456""#;
+        let source = r#"local a = "rbxassetid://123456" local b = "roblox.com/asset/?id=123456" local c = "http://www.roblox.com/asset?id=123456""#;
         let out = replace_asset_ids(source, &map, false);
         assert!(out.contains("rbxassetid://999999"));
         assert!(out.contains("roblox.com/asset/?id=999999"));
+        assert!(out.contains("roblox.com/asset?id=999999"));
     }
 
     #[test]
