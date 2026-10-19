@@ -130,7 +130,7 @@ function setLanguage(lang) {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     const key = el.getAttribute("data-i18n");
     const val = t(key);
-    if (val && val !== key) {
+    if (val !== undefined && val !== null && val !== "") {
       el.textContent = val;
     }
   });
@@ -139,7 +139,7 @@ function setLanguage(lang) {
   document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
     const key = el.getAttribute("data-i18n-placeholder");
     const val = t(key);
-    if (val && val !== key) {
+    if (val !== undefined && val !== null && val !== "") {
       el.placeholder = val;
     }
   });
@@ -156,17 +156,26 @@ function setLanguage(lang) {
     if (currentStageStat) currentStageStat.textContent = localized;
   }
 }
+window.setLanguage = setLanguage;
 
 function initLanguage() {
   const dict = getDict();
-  const savedLang = localStorage.getItem(STORAGE_LANG);
+  let savedLang = null;
+  try {
+    savedLang = localStorage.getItem(STORAGE_LANG);
+  } catch (e) {
+    console.warn("LocalStorage getItem failed:", e);
+  }
   if (savedLang && dict[savedLang]) {
     setLanguage(savedLang);
     return;
   }
 
   // Detect from browser/system language
-  const navLang = (navigator.language || navigator.userLanguage || "en").toLowerCase();
+  let navLang = "en";
+  try {
+    navLang = (navigator.language || navigator.userLanguage || "en").toLowerCase();
+  } catch (e) {}
   const langPrefix = navLang.split("-")[0];
 
   if (dict[langPrefix]) {
@@ -179,6 +188,9 @@ function initLanguage() {
 
 if (langSelect) {
   langSelect.addEventListener("change", (e) => {
+    setLanguage(e.target.value);
+  });
+  langSelect.addEventListener("input", (e) => {
     setLanguage(e.target.value);
   });
 }

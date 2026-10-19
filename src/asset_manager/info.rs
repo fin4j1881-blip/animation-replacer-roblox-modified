@@ -199,6 +199,52 @@ async fn attempt_batch_fetch(
     Ok(())
 }
 
+/// Fallback method: fetches an asset directly via Roblox's v1 assetdelivery endpoint
+/// if batch delivery fails or the asset creator has no public games.
+async fn try_fetch_direct_v1(uploader: &AssetUploader, asset_id: u64) -> Option<AssetBatchResponse> {
+    let url = format!("https://assetdelivery.roblox.com/v1/asset/?id={}", asset_id);
+    let cookie = &uploader.roblosecurity;
+    let mut req = uploader
+        .http_client
+        .get(&url)
+        .header("User-Agent", "RobloxStudio/WinInet");
+
+    if !cookie.trim().is_empty() {
+        req = req.header("Cookie", format!(".ROBLOSECURITY={}", cookie));
+    }
+
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let final_url = resp.url().to_string();
+            let json = serde_json::json!({
+                "requestId": asset_id.to_string(),
+                "assetTypeId": 24,
+                "locations": [{
+                    "location": final_url
+                }]
+            });
+            match serde_json::from_value::<AssetBatchResponse>(json) {
+                Ok(batch_resp) => {
+                    info!("Successfully resolved asset {} via Direct v1 fallback!", asset_id);
+                    Some(batch_resp)
+                }
+                Err(e) => {
+                    error!("Failed to parse Direct v1 response for asset {}: {}", asset_id, e);
+                    None
+                }
+            }
+        }
+        Ok(resp) => {
+            debug!("Direct v1 fallback for asset {} returned HTTP {}", asset_id, resp.status());
+            None
+        }
+        Err(e) => {
+            debug!("Direct v1 fallback request failed for asset {}: {}", asset_id, e);
+            None
+        }
+    }
+}
+
 /// Processes batch responses, separating successes and failures.
 async fn process_batch_responses(
     uploader: &AssetUploader,
@@ -217,6 +263,7 @@ async fn process_batch_responses(
             handle_failed_asset(
                 uploader,
                 asset_id,
+                success_responses,
                 failed_ids,
                 place_id_cache,
                 failed_creators,
@@ -231,6 +278,7 @@ async fn process_batch_responses(
 async fn handle_failed_asset(
     uploader: &AssetUploader,
     asset_id: u64,
+    success_responses: &mut Vec<AssetBatchResponse>,
     failed_ids: &mut HashMap<u64, Vec<u64>>,
     place_id_cache: &mut HashMap<u64, u64>,
     failed_creators: &mut HashSet<u64>,
@@ -249,7 +297,13 @@ async fn handle_failed_asset(
             failed_ids.entry(place_id).or_default().push(asset_id);
         }
         Err(e) => {
-            error!("Failed to get place_id for asset {}: {}", asset_id, e);
+            warn!(
+                "Failed to get place_id for asset {}: {}. Attempting direct v1 fallback...",
+                asset_id, e
+            );
+            if let Some(direct_resp) = try_fetch_direct_v1(uploader, asset_id).await {
+                success_responses.push(direct_resp);
+            }
         }
     }
 }
@@ -313,11 +367,16 @@ async fn resolve_failed_assets(
                     for response in responses {
                         if response.errors.is_none() {
                             resolved_responses.push(response);
-                        } else {
-                            error!(
-                                "Failed to resolve asset {:?} with place_id {}",
-                                response.request_id, place_id
+                        } else if let Some(ref request_id) = response.request_id
+                            && let Ok(asset_id) = request_id.parse::<u64>()
+                        {
+                            warn!(
+                                "Asset {} failed with place_id {}, trying direct v1 fallback...",
+                                asset_id, place_id
                             );
+                            if let Some(direct_resp) = try_fetch_direct_v1(uploader, asset_id).await {
+                                resolved_responses.push(direct_resp);
+                            }
                         }
                     }
                     break;

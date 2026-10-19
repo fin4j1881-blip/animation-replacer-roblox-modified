@@ -224,6 +224,42 @@ impl AssetUploader {
                 });
             }
 
+fn extract_asset_id_from_op(val: &serde_json::Value) -> Option<String> {
+    if let Some(resp) = val.get("response") {
+        if let Some(asset_id) = resp.get("assetId") {
+            if let Some(s) = asset_id.as_str() {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+            if let Some(n) = asset_id.as_u64() {
+                return Some(n.to_string());
+            }
+            if let Some(n) = asset_id.as_i64() {
+                return Some(n.to_string());
+            }
+        }
+        if let Some(path) = resp.get("path").and_then(|v| v.as_str()) {
+            if let Some(id) = path.strip_prefix("assets/") {
+                if !id.is_empty() {
+                    return Some(id.to_string());
+                }
+            }
+        }
+    }
+    if let Some(asset_id) = val.get("assetId") {
+        if let Some(s) = asset_id.as_str() {
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+        if let Some(n) = asset_id.as_u64() {
+            return Some(n.to_string());
+        }
+    }
+    None
+}
+
             // Success (200/201): Parse operation response
             let body_text = resp.text().await.map_err(RoboatError::ReqwestError)?;
             let op: serde_json::Value = serde_json::from_str(&body_text)
@@ -231,13 +267,9 @@ impl AssetUploader {
 
             // If operation is already done
             if op.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
-                if let Some(asset_id) = op
-                    .get("response")
-                    .and_then(|r| r.get("assetId"))
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(asset_id) = extract_asset_id_from_op(&op) {
                     info!("Upload complete (Studio Cookie Mode)! Asset ID: {}", asset_id);
-                    return Ok(asset_id.to_string());
+                    return Ok(asset_id);
                 }
             }
 
@@ -290,16 +322,12 @@ impl AssetUploader {
                     let poll_body = poll_resp.text().await.unwrap_or_default();
                     if let Ok(poll_val) = serde_json::from_str::<serde_json::Value>(&poll_body) {
                         if poll_val.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            if let Some(asset_id) = poll_val
-                                .get("response")
-                                .and_then(|r| r.get("assetId"))
-                                .and_then(|v| v.as_str())
-                            {
+                            if let Some(asset_id) = extract_asset_id_from_op(&poll_val) {
                                 info!(
                                     "Upload complete (Studio Cookie Mode polled)! Asset ID: {}",
                                     asset_id
                                 );
-                                return Ok(asset_id.to_string());
+                                return Ok(asset_id);
                             }
                             if let Some(err_msg) = poll_val
                                 .get("error")

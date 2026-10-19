@@ -23,7 +23,7 @@
       </div>
       <div class="header-badges">
         <!-- Language Selector -->
-        <select id="langSelect" class="lang-select" title="Change Language / Dil Değiştir">
+        <select id="langSelect" class="lang-select" title="Change Language / Dil Değiştir" onchange="window.setLanguage && window.setLanguage(this.value)" oninput="window.setLanguage && window.setLanguage(this.value)">
           <option value="tr">🇹🇷 Türkçe</option>
           <option value="en">🇺🇸 English</option>
           <option value="es">🇪🇸 Español</option>

@@ -14,9 +14,10 @@ use ustr::Ustr;
 static DIGIT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\d+").expect("static regex must compile"));
 static ANIMATION_ID_KEY: LazyLock<Ustr> = LazyLock::new(|| Ustr::from("AnimationId"));
+static VALUE_KEY: LazyLock<Ustr> = LazyLock::new(|| Ustr::from("Value"));
 
 impl StudioParser {
-    /// Finds Animation instances in the workspace and returns their metadata.
+    /// Finds Animation instances and animation Value objects in the workspace and returns their metadata.
     ///
     /// # Examples
     ///
@@ -34,22 +35,52 @@ impl StudioParser {
     /// # }
     /// ```
     pub async fn workspace_animations(&self) -> anyhow::Result<Vec<AssetBatchResponse>> {
-        let mut asset_ids: Vec<u64> = self
-            .dom
-            .descendants()
-            .filter(|instance| instance.class == "Animation")
-            .filter_map(
-                |instance| match instance.properties.get(&ANIMATION_ID_KEY) {
+        let mut asset_ids: Vec<u64> = Vec::new();
+
+        for instance in self.dom.descendants() {
+            if instance.class == "Animation" {
+                let id = match instance.properties.get(&ANIMATION_ID_KEY) {
                     Some(Variant::ContentId(content_id)) => DIGIT_RE
                         .find(content_id.as_str())
+                        .and_then(|mat| mat.as_str().parse::<u64>().ok()),
+                    Some(Variant::Content(content)) => content
+                        .as_uri()
+                        .and_then(|uri| DIGIT_RE.find(uri))
                         .and_then(|mat| mat.as_str().parse::<u64>().ok()),
                     Some(Variant::String(s)) => DIGIT_RE
                         .find(s.as_str())
                         .and_then(|mat| mat.as_str().parse::<u64>().ok()),
                     _ => None,
-                },
-            )
-            .collect();
+                };
+                if let Some(id) = id {
+                    asset_ids.push(id);
+                }
+            } else if instance.class == "StringValue" {
+                if let Some(Variant::String(s)) = instance.properties.get(&VALUE_KEY) {
+                    let s_str = s.as_str();
+                    let is_anim_name = instance.name.to_ascii_lowercase().contains("anim");
+                    let has_asset_prefix = s_str.contains("rbxassetid://") || s_str.contains("roblox.com/asset");
+                    if has_asset_prefix || is_anim_name {
+                        if let Some(mat) = DIGIT_RE.find(s_str) {
+                            if let Ok(id) = mat.as_str().parse::<u64>() {
+                                if id > 100_000 {
+                                    asset_ids.push(id);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if instance.class == "IntValue" {
+                let is_anim_name = instance.name.to_ascii_lowercase().contains("anim");
+                if is_anim_name {
+                    if let Some(Variant::Int64(val)) = instance.properties.get(&VALUE_KEY) {
+                        if *val > 100_000 {
+                            asset_ids.push(*val as u64);
+                        }
+                    }
+                }
+            }
+        }
 
         asset_ids.sort_unstable();
         asset_ids.dedup();

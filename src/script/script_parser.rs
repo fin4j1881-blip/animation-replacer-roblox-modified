@@ -11,7 +11,7 @@ static SOURCE_KEY: LazyLock<Ustr> = LazyLock::new(|| Ustr::from("Source"));
 static UNFORMATTED_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(\d{6,})\b").expect("static regex must compile"));
 static FORMATTED_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:rbxassetid://|roblox\.com/asset/?\?id=)(\d{6,})")
+    Regex::new(r"(?:rbxassetid://|(?:https?://)?(?:www\.)?roblox\.com/asset/?\?id=)(\d{6,})")
         .expect("static regex must compile")
 });
 

@@ -108,6 +108,7 @@ fn categorize_assets(
     seen_ids: &mut HashSet<String>,
     all_animations: &mut Vec<AssetBatchResponse>,
     all_audios: &mut Vec<AssetBatchResponse>,
+    is_workspace: bool,
 ) {
     for asset in batch {
         if let Some(ref asset_id) = asset.request_id {
@@ -115,10 +116,15 @@ fn categorize_assets(
                 continue;
             }
 
-            match asset.asset_type {
-                Some(AssetType::Animation) => all_animations.push(asset),
-                Some(AssetType::Audio) => all_audios.push(asset),
-                _ => {}
+            let is_anim = matches!(asset.asset_type, Some(AssetType::Animation))
+                || asset.asset_type_id == Some(24);
+            let is_audio = matches!(asset.asset_type, Some(AssetType::Audio))
+                || asset.asset_type_id == Some(3);
+
+            if is_anim || (is_workspace && !is_audio && asset.asset_type.is_none()) {
+                all_animations.push(asset);
+            } else if is_audio {
+                all_audios.push(asset);
             }
         }
     }
@@ -195,6 +201,7 @@ async fn main() {
                 &mut seen_ids,
                 &mut all_animations,
                 &mut all_audios,
+                true,
             );
         }
         Err(e) => {
@@ -209,6 +216,7 @@ async fn main() {
                 &mut seen_ids,
                 &mut all_animations,
                 &mut all_audios,
+                false,
             );
         }
         Err(e) => {

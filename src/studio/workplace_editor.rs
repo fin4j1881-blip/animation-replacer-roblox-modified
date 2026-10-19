@@ -1,7 +1,7 @@
 use crate::StudioParser;
 use crate::studio::workplace_parser::is_xml_file;
 use rbx_binary::to_writer as to_binary;
-use rbx_types::Variant;
+use rbx_types::{Content, Variant};
 use rbx_xml::to_writer_default as to_xml;
 use regex::Regex;
 use std::collections::HashMap;
@@ -9,52 +9,112 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
+use tracing::info;
 use ustr::Ustr;
 
 static DIGIT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\d+").expect("static regex must compile"));
 static ANIMATION_ID_KEY: LazyLock<Ustr> = LazyLock::new(|| Ustr::from("AnimationId"));
+static VALUE_KEY: LazyLock<Ustr> = LazyLock::new(|| Ustr::from("Value"));
 
 impl StudioParser {
-    /// Gets all animation instances in the file, scans their animationId then replaces them if a
-    /// new one is provided.
+    /// Gets all animation instances and animation Value objects in the file, scans their IDs,
+    /// and replaces them if a new one is provided in `animation_mapping`.
     ///
-    /// Handles both `rbxassetid://{id}` and `roblox.com/asset/?id={id}` content IDs across
-    /// both `Variant::ContentId` and `Variant::String` representations.
+    /// Handles `rbxassetid://{id}`, `roblox.com/asset/?id={id}`, and raw ID representations
+    /// across `Variant::Content`, `Variant::ContentId`, `Variant::String`, and `Variant::Int64`.
     pub fn update_game_animations(&mut self, animation_mapping: &HashMap<String, String>) {
         if animation_mapping.is_empty() {
             return;
         }
 
-        let animation_instances_referent: Vec<_> = self
-            .dom
-            .descendants()
-            .filter(|instance| instance.class.as_str() == "Animation")
-            .map(|instance| instance.referent())
-            .collect();
+        let mut animation_refs = Vec::new();
+        let mut string_value_refs = Vec::new();
+        let mut int_value_refs = Vec::new();
 
-        for animation_ref in animation_instances_referent {
+        for instance in self.dom.descendants() {
+            match instance.class.as_str() {
+                "Animation" => animation_refs.push(instance.referent()),
+                "StringValue" => string_value_refs.push(instance.referent()),
+                "IntValue" => int_value_refs.push(instance.referent()),
+                _ => {}
+            }
+        }
+
+        let mut replaced_animations = 0;
+        let mut replaced_values = 0;
+
+        for animation_ref in animation_refs {
             if let Some(instance) = self.dom.get_by_ref_mut(animation_ref) {
-                let matched_new_id = match instance.properties.get(&ANIMATION_ID_KEY) {
+                let current_prop = instance.properties.get(&ANIMATION_ID_KEY).cloned();
+                let matched = match &current_prop {
                     Some(Variant::ContentId(content_id)) => DIGIT_RE
                         .find(content_id.as_str())
                         .and_then(|mat| animation_mapping.get(mat.as_str()))
-                        .cloned(),
+                        .map(|new_id| (new_id.clone(), 0)), // 0 = ContentId
+                    Some(Variant::Content(content)) => content
+                        .as_uri()
+                        .and_then(|uri| DIGIT_RE.find(uri))
+                        .and_then(|mat| animation_mapping.get(mat.as_str()))
+                        .map(|new_id| (new_id.clone(), 1)), // 1 = Content
                     Some(Variant::String(s)) => DIGIT_RE
                         .find(s.as_str())
                         .and_then(|mat| animation_mapping.get(mat.as_str()))
-                        .cloned(),
+                        .map(|new_id| (new_id.clone(), 2)), // 2 = String
                     _ => None,
                 };
 
-                if let Some(new_id) = matched_new_id {
+                if let Some((new_id, prop_type)) = matched {
                     let rbxasset = format!("rbxassetid://{}", new_id);
-                    instance
-                        .properties
-                        .insert(*ANIMATION_ID_KEY, Variant::ContentId(rbxasset.into()));
+                    let new_variant = match prop_type {
+                        1 => Variant::Content(Content::from_uri(&rbxasset)),
+                        2 => Variant::String(rbxasset.into()),
+                        _ => Variant::ContentId(rbxasset.into()),
+                    };
+                    instance.properties.insert(*ANIMATION_ID_KEY, new_variant);
+                    replaced_animations += 1;
                 }
             }
         }
+
+        for sv_ref in string_value_refs {
+            if let Some(instance) = self.dom.get_by_ref_mut(sv_ref) {
+                if let Some(Variant::String(s)) = instance.properties.get(&VALUE_KEY) {
+                    let s_str = s.as_str();
+                    if let Some(mat) = DIGIT_RE.find(s_str) {
+                        if let Some(new_id) = animation_mapping.get(mat.as_str()) {
+                            let mut new_str = s_str.to_string();
+                            new_str.replace_range(mat.range(), new_id);
+                            instance
+                                .properties
+                                .insert(*VALUE_KEY, Variant::String(new_str.into()));
+                            replaced_values += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        for iv_ref in int_value_refs {
+            if let Some(instance) = self.dom.get_by_ref_mut(iv_ref) {
+                if let Some(Variant::Int64(val)) = instance.properties.get(&VALUE_KEY) {
+                    let old_id_str = val.to_string();
+                    if let Some(new_id) = animation_mapping.get(&old_id_str) {
+                        if let Ok(new_val) = new_id.parse::<i64>() {
+                            instance
+                                .properties
+                                .insert(*VALUE_KEY, Variant::Int64(new_val));
+                            replaced_values += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        info!(
+            "Workplace update complete: replaced {} Animation instances and {} Value objects",
+            replaced_animations, replaced_values
+        );
     }
 
     /// Saves the DOM to a `.rbxl` or `.rbxlx` file atomically using a temporary file

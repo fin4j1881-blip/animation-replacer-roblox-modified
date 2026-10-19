@@ -32,6 +32,10 @@ body {
   overflow-y: auto;
 }
 
+input, select, textarea, button {
+  user-select: auto;
+}
+
 .app-container {
   max-width: 980px;
   margin: 0 auto;
